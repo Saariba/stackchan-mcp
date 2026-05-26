@@ -525,6 +525,32 @@ void Application::InitializeProtocol() {
                     // for the lifetime of this TTS utterance. Default no-op
                     // for boards without a mouth display.
                     board.OnTtsStart();
+
+                    // Emit device->gateway `tts_start` event. Distinct from
+                    // `state_changed: speaking` above: the state-change event
+                    // fires whenever the device enters Speaking (including
+                    // non-TTS audio paths such as boot sounds, popups, etc.),
+                    // whereas `tts_start` is anchored to the actual TTS
+                    // playback boundary signalled by the gateway. Webhook
+                    // subscribers that care about utterance-level timing
+                    // (e.g. lipsync logging, transcript pairing) want this
+                    // narrower signal.
+                    tts_start_time_us_ = esp_timer_get_time();
+                    if (protocol_) {
+                        cJSON* evt = cJSON_CreateObject();
+                        cJSON_AddStringToObject(evt, "type", "event");
+                        cJSON_AddStringToObject(evt, "event", "tts_start");
+                        cJSON_AddNumberToObject(evt, "timestamp_us",
+                                                (double)tts_start_time_us_);
+                        cJSON* data = cJSON_AddObjectToObject(evt, "data");
+                        (void)data;  // no extra fields for now
+                        char* str = cJSON_PrintUnformatted(evt);
+                        if (str != nullptr) {
+                            protocol_->SendText(std::string(str));
+                            cJSON_free(str);
+                        }
+                        cJSON_Delete(evt);
+                    }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this, &board]() {
@@ -562,6 +588,36 @@ void Application::InitializeProtocol() {
                     // OnTtsStop() is idempotent (no-op for boards without
                     // an avatar / when lip-sync is already stopped).
                     board.OnTtsStop();
+
+                    // Emit device->gateway `tts_stop` event. Counterpart to
+                    // `tts_start` above; fires on every gateway-signalled
+                    // tts.stop, even if the device was already moved out of
+                    // Speaking by AbortSpeaking() (mirroring the
+                    // OnTtsStop() unconditional-stop rationale). Includes
+                    // duration_ms when a matching tts_start was seen this
+                    // session.
+                    int64_t now_us = esp_timer_get_time();
+                    if (protocol_) {
+                        cJSON* evt = cJSON_CreateObject();
+                        cJSON_AddStringToObject(evt, "type", "event");
+                        cJSON_AddStringToObject(evt, "event", "tts_stop");
+                        cJSON_AddNumberToObject(evt, "timestamp_us",
+                                                (double)now_us);
+                        cJSON* data = cJSON_AddObjectToObject(evt, "data");
+                        if (tts_start_time_us_ > 0) {
+                            int64_t duration_ms =
+                                (now_us - tts_start_time_us_) / 1000;
+                            cJSON_AddNumberToObject(data, "duration_ms",
+                                                    (double)duration_ms);
+                        }
+                        char* str = cJSON_PrintUnformatted(evt);
+                        if (str != nullptr) {
+                            protocol_->SendText(std::string(str));
+                            cJSON_free(str);
+                        }
+                        cJSON_Delete(evt);
+                    }
+                    tts_start_time_us_ = 0;
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
@@ -839,12 +895,47 @@ void Application::HandleStartListeningEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
         SetListeningMode(kListeningModeManualStop);
+    } else {
+        // No mic capture transition for other states (Connecting, Listening,
+        // Upgrading, etc.) — don't emit listen_start.
+        return;
+    }
+
+    // Push listen_start event to gateway. This fires at the mic-capture
+    // boundary for both gateway-initiated listen requests and locally
+    // initiated push-to-talk (Idle/Speaking -> Listening). Wake-word
+    // activation goes through HandleWakeWordDetectedEvent, not here, so
+    // that path is currently not covered.
+    if (protocol_) {
+        const char* mode_str = "auto";
+        switch (listening_mode_) {
+            case kListeningModeManualStop: mode_str = "manual"; break;
+            case kListeningModeAutoStop:   mode_str = "auto"; break;
+            case kListeningModeRealtime:   mode_str = "realtime"; break;
+        }
+        cJSON* root = cJSON_CreateObject();
+        if (root) {
+            cJSON_AddStringToObject(root, "type", "event");
+            cJSON_AddStringToObject(root, "event", "listen_start");
+            cJSON_AddNumberToObject(root, "timestamp_us",
+                                    static_cast<double>(esp_timer_get_time()));
+            cJSON* data = cJSON_AddObjectToObject(root, "data");
+            if (data) {
+                cJSON_AddStringToObject(data, "mode", mode_str);
+            }
+            char* str = cJSON_PrintUnformatted(root);
+            if (str) {
+                SendJsonString(std::string(str));
+                cJSON_free(str);
+            }
+            cJSON_Delete(root);
+        }
     }
 }
 
 void Application::HandleStopListeningEvent() {
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateAudioTesting) {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
@@ -854,6 +945,27 @@ void Application::HandleStopListeningEvent() {
             protocol_->SendStopListening();
         }
         SetDeviceState(kDeviceStateIdle);
+
+        // Push listen_stop event to gateway at the mic-capture boundary
+        // (i.e. when we were actually listening and have now requested a
+        // stop). The kDeviceStateIdle transition above will tear down voice
+        // processing in HandleStateChangedEvent.
+        if (protocol_) {
+            cJSON* root = cJSON_CreateObject();
+            if (root) {
+                cJSON_AddStringToObject(root, "type", "event");
+                cJSON_AddStringToObject(root, "event", "listen_stop");
+                cJSON_AddNumberToObject(root, "timestamp_us",
+                                        static_cast<double>(esp_timer_get_time()));
+                cJSON_AddObjectToObject(root, "data");
+                char* str = cJSON_PrintUnformatted(root);
+                if (str) {
+                    SendJsonString(std::string(str));
+                    cJSON_free(str);
+                }
+                cJSON_Delete(root);
+            }
+        }
     }
 }
 
@@ -865,6 +977,26 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+
+    // Emit wake_word_detected event over the WS for gateway/webhook dispatch.
+    // Runs on the main task (driven from MainLoop via MAIN_EVENT_WAKE_WORD_DETECTED),
+    // so SendText() is safe to call directly without going through Schedule().
+    {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "type", "event");
+        cJSON_AddStringToObject(root, "event", "wake_word_detected");
+        cJSON_AddNumberToObject(root, "timestamp_us",
+                                static_cast<double>(esp_timer_get_time()));
+        cJSON* data = cJSON_CreateObject();
+        cJSON_AddStringToObject(data, "wake_word", wake_word.c_str());
+        cJSON_AddItemToObject(root, "data", data);
+        char* payload = cJSON_PrintUnformatted(root);
+        if (payload != nullptr) {
+            protocol_->SendText(std::string(payload));
+            cJSON_free(payload);
+        }
+        cJSON_Delete(root);
+    }
 
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();

@@ -117,30 +117,37 @@ async def fake_esp32(ws_port: int = 8765) -> None:
         # Give the gateway a moment to initialize
         await asyncio.sleep(1.5)
 
-        # Send a touch event (tap)
-        touch_event = {
-            "type": "event",
-            "event": "touch",
-            "timestamp_us": 123456789,
-            "data": {
-                "gesture": "tap",
-                "duration_ms": 180,
-                "zones": [True, False, False],
-            },
-        }
-        await ws.send(json.dumps(touch_event))
-        print("\n[esp32] sent touch event (tap)")
+        # All event types the firmware can emit
+        events_to_send = [
+            ("touch", {"gesture": "tap", "duration_ms": 180,
+                       "zones": [True, False, False]}),
+            ("touch", {"gesture": "stroke", "duration_ms": 720,
+                       "zones": [False, True, True]}),
+            ("lcd_touch", {"action": "tap", "duration_ms": 120}),
+            ("lcd_touch", {"action": "long_press", "duration_ms": 850}),
+            ("state_changed", {"state": "listening"}),
+            ("state_changed", {"state": "speaking"}),
+            ("state_changed", {"state": "idle"}),
+            ("wake_word_detected", {"wake_word": "hi stackchan"}),
+            ("listen_start", {"mode": "manual"}),
+            ("listen_stop", {}),
+            ("tts_start", {}),
+            ("tts_stop", {"duration_ms": 2400}),
+            ("low_battery", {"percent": 15, "is_critical": True}),
+        ]
 
-        # Send a state_changed event
-        await asyncio.sleep(0.5)
-        state_event = {
-            "type": "event",
-            "event": "state_changed",
-            "timestamp_us": 123457000,
-            "data": {"state": "listening"},
-        }
-        await ws.send(json.dumps(state_event))
-        print("[esp32] sent state_changed event (listening)")
+        ts = 100_000_000
+        for event_name, data in events_to_send:
+            ts += 1_000
+            msg = {
+                "type": "event",
+                "event": event_name,
+                "timestamp_us": ts,
+                "data": data,
+            }
+            await ws.send(json.dumps(msg))
+            print(f"[esp32] sent {event_name} event")
+            await asyncio.sleep(0.15)
 
         # Wait for webhooks
         await asyncio.sleep(2)
@@ -171,16 +178,21 @@ async def main() -> None:
         await fake_esp32(ws_port)
 
         # Check results
+        expected_events = {
+            "touch", "lcd_touch", "state_changed", "wake_word_detected",
+            "listen_start", "listen_stop", "tts_start", "tts_stop",
+            "low_battery",
+        }
+        received_events = {wh["event"] for wh in received_webhooks}
+
         print("\n" + "=" * 60)
-        if len(received_webhooks) >= 2:
-            print(f"SUCCESS: received {len(received_webhooks)} webhook(s)")
-            for i, wh in enumerate(received_webhooks):
-                print(f"  [{i+1}] event={wh['event']}  data={wh['data']}")
-        elif len(received_webhooks) == 1:
-            print(f"PARTIAL: received 1 webhook (expected 2)")
-            print(f"  [1] event={received_webhooks[0]['event']}")
+        print(f"Sent {13} events, received {len(received_webhooks)} webhooks")
+        print(f"Unique event types delivered: {sorted(received_events)}")
+        missing = expected_events - received_events
+        if missing:
+            print(f"FAIL: missing event types: {sorted(missing)}")
         else:
-            print("FAIL: no webhooks received")
+            print(f"SUCCESS: all {len(expected_events)} event types delivered")
         print("=" * 60)
 
     finally:

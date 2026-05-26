@@ -2204,6 +2204,32 @@ private:
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
+    // Emit an `lcd_touch` event for FT6336 LCD touchscreen interactions
+    // (short tap vs. long press). Mirrors the EmitTouchEvent helper used for
+    // Si12T head-touch gestures, but for the LCD touch surface. Uses
+    // Application::SendJsonString for thread-safe dispatch since this is
+    // invoked from the esp_timer task that drives PollTouchpad.
+    void EmitLcdTouchEvent(const char* action, uint64_t duration_ms) {
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) return;
+        cJSON_AddStringToObject(root, "type", "event");
+        cJSON_AddStringToObject(root, "event", "lcd_touch");
+        cJSON_AddNumberToObject(root, "timestamp_us",
+                                static_cast<double>(esp_timer_get_time()));
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        if (data) {
+            cJSON_AddStringToObject(data, "action", action);
+            cJSON_AddNumberToObject(data, "duration_ms",
+                                    static_cast<double>(duration_ms));
+        }
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            Application::GetInstance().SendJsonString(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
+    }
+
     void PollTouchpad() {
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
@@ -2266,6 +2292,16 @@ private:
             was_touched = false;
             int64_t touch_duration = now_ms - touch_start_time;
             last_release_ms = now_ms;
+
+            // Emit lcd_touch event alongside the existing push-to-talk
+            // behavior. Classification matches the TOUCH_THRESHOLD_MS split
+            // used below: short release => "tap", long hold => "long_press".
+            // Fires for every classified release regardless of whether the
+            // tap actually triggered StartListening / StopListening, so
+            // external subscribers see every LCD interaction.
+            EmitLcdTouchEvent(
+                touch_duration < TOUCH_THRESHOLD_MS ? "tap" : "long_press",
+                static_cast<uint64_t>(touch_duration));
 
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
@@ -6133,7 +6169,53 @@ public:
         }
 
         level = pmic_->GetBatteryLevel();
+
+        // Edge-triggered low-battery event. Threshold mirrors LvglDisplay's
+        // BATTERY_EMPTY icon (< 20% via level/20 == 0) combined with the
+        // discharging check used to gate the on-screen popup. The static
+        // latch ensures we only emit on the transition INTO the low state;
+        // it clears once the battery recovers above the threshold or the
+        // pack starts charging, so the next dip will re-arm and re-fire.
+        // Called from LvglDisplay::UpdateStatusBar() on the LVGL task (not
+        // the main task), so we use SendJsonString() which routes through
+        // Application::Schedule() for thread safety.
+        static bool low_battery_emitted = false;
+        const int kLowBatteryThreshold = 20;
+        bool is_low = (level < kLowBatteryThreshold) && discharging;
+        if (is_low && !low_battery_emitted) {
+            EmitLowBatteryEvent(level, /*is_critical=*/true);
+            low_battery_emitted = true;
+        } else if (!is_low && low_battery_emitted) {
+            low_battery_emitted = false;
+        }
+
         return true;
+    }
+
+    // Build and dispatch a low_battery event over the existing WebSocket.
+    // Mirrors SendAvatarSetLoaded()'s cJSON + SendJsonString() pattern.
+    // voltage_mv is omitted because Pmic/AXP2101 exposes only percent +
+    // charging/discharging flags; adding voltage would require new I2C
+    // reads against the AXP2101 fuel-gauge registers.
+    static void EmitLowBatteryEvent(int percent, bool is_critical) {
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) return;
+        cJSON_AddStringToObject(root, "type", "event");
+        cJSON_AddStringToObject(root, "event", "low_battery");
+        cJSON_AddNumberToObject(root, "timestamp_us",
+                                static_cast<double>(esp_timer_get_time()));
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        if (data) {
+            cJSON_AddNumberToObject(data, "percent",
+                                    static_cast<double>(percent));
+            cJSON_AddBoolToObject(data, "is_critical", is_critical);
+        }
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            Application::GetInstance().SendJsonString(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
     }
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {

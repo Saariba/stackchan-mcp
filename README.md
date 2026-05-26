@@ -560,7 +560,16 @@ The StackChan can push device events to external systems (Home Assistant, n8n, I
 | Event | Trigger | Payload |
 |---|---|---|
 | `touch` | Head tap or stroke (Si12T sensor) | `{"gesture": "tap"\|"stroke", "duration_ms": 180, "zones": [true, false, false]}` |
+| `lcd_touch` | LCD screen tap or long-press (FT6336) | `{"action": "tap"\|"long_press", "duration_ms": 120}` |
 | `state_changed` | Device state transition | `{"state": "idle"\|"listening"\|"speaking"\|...}` |
+| `wake_word_detected` | Wake-word fired in audio pipeline | `{"wake_word": "<detected word>"}` |
+| `listen_start` | Mic capture begins | `{"mode": "manual"\|"auto"\|"realtime"}` |
+| `listen_stop` | Mic capture ends | `{}` |
+| `tts_start` | TTS playback begins on speaker | `{}` |
+| `tts_stop` | TTS playback ends | `{"duration_ms": 2400}` |
+| `low_battery` | Battery crossed below 20% while discharging (edge-triggered) | `{"percent": 15, "is_critical": true}` |
+
+Planned (requires firmware driver work): `imu_motion` (shake/pickup detection via BMI270 — driver not yet ported from upstream m5stack/StackChan).
 
 The system is extensible — adding a new event type in firmware requires only a single `SendJsonString()` call; no gateway changes needed.
 

@@ -484,7 +484,16 @@ StackChan はデバイスイベントを HTTP webhook 経由で外部システ�
 | イベント | トリガー | ペイロード |
 |---|---|---|
 | `touch` | 頭のタップまたはストローク (Si12T センサ) | `{"gesture": "tap"\|"stroke", "duration_ms": 180, "zones": [true, false, false]}` |
+| `lcd_touch` | LCD 画面のタップ または長押し (FT6336) | `{"action": "tap"\|"long_press", "duration_ms": 120}` |
 | `state_changed` | デバイス状態遷移 | `{"state": "idle"\|"listening"\|"speaking"\|...}` |
+| `wake_word_detected` | ウェイクワード検出 (音声パイプライン) | `{"wake_word": "<検出された語>"}` |
+| `listen_start` | マイク収音開始 | `{"mode": "manual"\|"auto"\|"realtime"}` |
+| `listen_stop` | マイク収音終了 | `{}` |
+| `tts_start` | スピーカーで TTS 再生開始 | `{}` |
+| `tts_stop` | TTS 再生終了 | `{"duration_ms": 2400}` |
+| `low_battery` | バッテリー残量 20% を下回り、かつ放電中 (エッジトリガー) | `{"percent": 15, "is_critical": true}` |
+
+未対応（ファームウェアドライバ実装が必要）: `imu_motion` (BMI270 によるシェイク／持ち上げ検出 — upstream m5stack/StackChan のドライバが未ポート)。
 
 拡張性を重視した設計で、新しいイベント種別をファームウェアに追加するには `SendJsonString()` 1 回の呼び出しだけで済み、gateway 側の変更は不要です。
 
