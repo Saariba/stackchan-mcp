@@ -14,7 +14,9 @@ from aiohttp import web
 
 from .capture_server import create_capture_app, stage_avatar_set
 from .esp32_client import ESP32Manager
+from .event_bus import DeviceEvent, EventBus
 from .mdns_advertiser import MdnsAdvertiser
+from .webhook import WebhookDispatcher, parse_webhook_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +31,15 @@ class Gateway:
     """
 
     def __init__(self):
-        self.esp32 = ESP32Manager()
+        self.event_bus = EventBus()
+        self.esp32 = ESP32Manager(event_bus=self.event_bus)
         self._running = False
         self._http_runner: web.AppRunner | None = None
         # Phase 4.5 avatar: kept so load_avatar_set can stage payloads
         # against the same web.Application that serves /avatar_set/{id}.
         self._capture_app: web.Application | None = None
         self._mdns_advertiser: MdnsAdvertiser | None = None
+        self._webhook_dispatcher: WebhookDispatcher | None = None
 
     @property
     def vision_url(self) -> str:
@@ -112,6 +116,21 @@ class Gateway:
         else:
             self._mdns_advertiser = None
 
+        # Wire up webhook subscriber(s) for device-originated push events
+        webhook_targets = parse_webhook_config()
+        if webhook_targets:
+            self._webhook_dispatcher = WebhookDispatcher(webhook_targets)
+            self.event_bus.subscribe(self._webhook_dispatcher.handle_event)
+            logger.info(
+                "Webhooks configured: %d target(s)",
+                len(webhook_targets),
+            )
+
+        async def _log_event(ev: DeviceEvent) -> None:
+            logger.debug("Device event: %s %s", ev.event, ev.data)
+
+        self.event_bus.subscribe(_log_event)
+
         self._running = True
         logger.info(
             "Gateway started: WS on %s:%d, capture on %s:%d, vision_url=%s",
@@ -121,6 +140,10 @@ class Gateway:
     async def stop(self) -> None:
         """Stop the gateway."""
         self._running = False
+        await self.event_bus.shutdown()
+        if self._webhook_dispatcher:
+            await self._webhook_dispatcher.close()
+            self._webhook_dispatcher = None
         if self._mdns_advertiser:
             try:
                 await self._mdns_advertiser.stop()

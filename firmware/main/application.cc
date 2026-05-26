@@ -937,11 +937,33 @@ void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
 
+    // Push state_changed event to gateway
+    if (protocol_) {
+        cJSON* root = cJSON_CreateObject();
+        if (root) {
+            cJSON_AddStringToObject(root, "type", "event");
+            cJSON_AddStringToObject(root, "event", "state_changed");
+            cJSON_AddNumberToObject(root, "timestamp_us",
+                                    static_cast<double>(esp_timer_get_time()));
+            cJSON* data = cJSON_AddObjectToObject(root, "data");
+            if (data) {
+                cJSON_AddStringToObject(data, "state",
+                    DeviceStateMachine::GetStateName(new_state));
+            }
+            char* str = cJSON_PrintUnformatted(root);
+            if (str) {
+                SendJsonString(std::string(str));
+                cJSON_free(str);
+            }
+            cJSON_Delete(root);
+        }
+    }
+
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
-    
+
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:

@@ -19,6 +19,7 @@ import websockets.exceptions
 from websockets.asyncio.server import ServerConnection
 
 from .audio_stream import handle_audio_frame
+from .event_bus import DeviceEvent, EventBus
 from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 
 logger = logging.getLogger(__name__)
@@ -347,13 +348,14 @@ class ESP32Manager:
     Currently supports a single device connection.
     """
 
-    def __init__(self):
+    def __init__(self, event_bus: EventBus | None = None):
         self._connection: ESP32Connection | None = None
         self._server: Any = None
         self._lock = asyncio.Lock()
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
         self._vision_token: str = ""
+        self._event_bus = event_bus
         # Per-device serialisation for TTS send sequences. Acquired by
         # the orchestrator around the entire start → frames → stop
         # block so concurrent ``say()`` invocations cannot interleave
@@ -565,6 +567,20 @@ class ESP32Manager:
                     # docs/intent/stackchan_avatar_pipeline.md §C-3 in
                     # the SAIVerse repository).
                     connection.handle_avatar_set_loaded(data)
+
+                elif msg_type == "event":
+                    if self._event_bus:
+                        try:
+                            event = DeviceEvent(
+                                event=data.get("event", "unknown"),
+                                timestamp_us=data.get("timestamp_us", 0),
+                                data=data.get("data", {}),
+                                device_id=connection.device_id,
+                                raw=data,
+                            )
+                            await self._event_bus.publish(event)
+                        except Exception:
+                            logger.exception("Failed to publish device event")
 
                 else:
                     logger.debug("ESP32 message type=%s (ignored)", msg_type)

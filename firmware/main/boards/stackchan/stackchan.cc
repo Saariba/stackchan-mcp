@@ -3709,6 +3709,34 @@ private:
                  (unsigned)duration_ms);
     }
 
+    void EmitTouchEvent(const char* gesture, uint64_t duration_ms) {
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) return;
+        cJSON_AddStringToObject(root, "type", "event");
+        cJSON_AddStringToObject(root, "event", "touch");
+        cJSON_AddNumberToObject(root, "timestamp_us",
+                                static_cast<double>(esp_timer_get_time()));
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        if (data) {
+            cJSON_AddStringToObject(data, "gesture", gesture);
+            cJSON_AddNumberToObject(data, "duration_ms",
+                                    static_cast<double>(duration_ms));
+            cJSON* zones = cJSON_AddArrayToObject(data, "zones");
+            if (zones) {
+                for (int i = 0; i < 3; i++) {
+                    cJSON_AddItemToArray(zones,
+                        cJSON_CreateBool(press_start_zones_[i]));
+                }
+            }
+        }
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            Application::GetInstance().SendJsonString(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
+    }
+
     void HandleTap(uint64_t duration_ms) {
         LogTouchEvent("TAP", duration_ms);
         last_event_ = TouchEvent::TAP;
@@ -3717,6 +3745,7 @@ private:
         // not pop the avatar back over the WiFi config / settings screens.
         SetAvatarExpressionIfActive("surprised");
         ScheduleIdleRevert();
+        EmitTouchEvent("tap", duration_ms);
     }
 
     void HandleStroke(uint64_t duration_ms) {
@@ -3726,6 +3755,7 @@ private:
         SetAvatarExpressionIfActive("embarrassed");
         StartServoWobble();
         ScheduleIdleRevert();
+        EmitTouchEvent("stroke", duration_ms);
     }
 
     // 200 ms periodic poll. Reads the sensor, applies a 2-sample debounce on
