@@ -475,6 +475,48 @@ python scripts/avatar_convert/convert_avatars.py
 
 個人用 PNG、生成済みローカルアバター、撮影画像、その他ユーザー固有のアセットは commit しないでください。
 
+## イベントシステム（Webhook 連携）
+
+StackChan はデバイスイベントを HTTP webhook 経由で外部システム（Home Assistant / n8n / IFTTT / カスタムエンドポイントなど）にプッシュできます。ファームウェアは既存の WebSocket 接続でイベントを送出し、gateway が設定済みの webhook URL に転送します。
+
+**対応イベント:**
+
+| イベント | トリガー | ペイロード |
+|---|---|---|
+| `touch` | 頭のタップまたはストローク (Si12T センサ) | `{"gesture": "tap"\|"stroke", "duration_ms": 180, "zones": [true, false, false]}` |
+| `state_changed` | デバイス状態遷移 | `{"state": "idle"\|"listening"\|"speaking"\|...}` |
+
+拡張性を重視した設計で、新しいイベント種別をファームウェアに追加するには `SendJsonString()` 1 回の呼び出しだけで済み、gateway 側の変更は不要です。
+
+### 設定
+
+ゲートウェイ側の環境変数:
+
+| 環境変数 | デフォルト | 補足 |
+|---|---|---|
+| `STACKCHAN_WEBHOOK_URLS` | *(なし)* | カンマ区切りの webhook 送信先 URL。未設定ならイベント転送なし |
+| `STACKCHAN_WEBHOOK_TOKENS` | *(なし)* | カンマ区切りの Bearer トークン（URL と位置で対応） |
+| `STACKCHAN_WEBHOOK_EVENTS` | *(全部)* | カンマ区切りのイベント種別フィルタ（例: `touch,state_changed`）。未設定なら全イベント転送 |
+
+### 使い方
+
+```bash
+STACKCHAN_WEBHOOK_URLS=https://n8n.local/webhook/stackchan \
+  stackchan-mcp
+```
+
+StackChan の頭をタップすると、webhook に以下が届きます:
+
+```json
+{
+  "event": "touch",
+  "timestamp_us": 123456789,
+  "device_id": "stackchan-abc",
+  "data": {"gesture": "tap", "duration_ms": 180, "zones": [true, false, false]},
+  "gateway_time": 1716739200.123
+}
+```
+
 ## 既知の課題
 
 - 大角度急逆転 (±60° → -60° 等) でサーボハングする場合あり (Motion::update_task の補間移植で改善予定)

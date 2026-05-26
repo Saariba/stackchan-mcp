@@ -551,6 +551,48 @@ The X-axis (yaw, `-90..+90°`) is not subject to a comparable hardware restricti
 
 See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the lower-bound engineering background and [#98](https://github.com/kisaragi-mochi/stackchan-mcp/issues/98) for the two-tier upper-bound widening (firmware hard clamp `30°` → `88°`, with the M5Stack-recommended `5..85°` operating range surfaced as a soft-signal tier).
 
+## Event system (webhook integration)
+
+The StackChan can push device events to external systems (Home Assistant, n8n, IFTTT, custom endpoints) via HTTP webhooks. The firmware emits events over the existing WebSocket connection; the gateway fans them out to configured webhook URLs.
+
+**Supported events:**
+
+| Event | Trigger | Payload |
+|---|---|---|
+| `touch` | Head tap or stroke (Si12T sensor) | `{"gesture": "tap"\|"stroke", "duration_ms": 180, "zones": [true, false, false]}` |
+| `state_changed` | Device state transition | `{"state": "idle"\|"listening"\|"speaking"\|...}` |
+
+The system is extensible — adding a new event type in firmware requires only a single `SendJsonString()` call; no gateway changes needed.
+
+### Configuration
+
+Set these environment variables on the gateway:
+
+| Environment variable | Default | Notes |
+|---|---|---|
+| `STACKCHAN_WEBHOOK_URLS` | *(none)* | Comma-separated webhook target URLs. Events are not forwarded if unset. |
+| `STACKCHAN_WEBHOOK_TOKENS` | *(none)* | Comma-separated Bearer tokens (positional match to URLs). |
+| `STACKCHAN_WEBHOOK_EVENTS` | *(all)* | Comma-separated event type filter (e.g. `touch,state_changed`). All events forwarded if unset. |
+
+### Example
+
+```bash
+STACKCHAN_WEBHOOK_URLS=https://n8n.local/webhook/stackchan \
+  stackchan-mcp
+```
+
+Tap the StackChan's head and the webhook receives:
+
+```json
+{
+  "event": "touch",
+  "timestamp_us": 123456789,
+  "device_id": "stackchan-abc",
+  "data": {"gesture": "tap", "duration_ms": 180, "zones": [true, false, false]},
+  "gateway_time": 1716739200.123
+}
+```
+
 ## Known issues
 
 - The servo bus may hang on large-angle abrupt reversals (e.g. +60° → -60°). A fix is in progress via Motion::update_task interpolation.
