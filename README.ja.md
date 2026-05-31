@@ -477,54 +477,34 @@ python scripts/avatar_convert/convert_avatars.py
 
 ## イベントシステム（Webhook 連携）
 
-StackChan はデバイスイベントを HTTP webhook 経由で外部システム（Home Assistant / n8n / IFTTT / カスタムエンドポイントなど）にプッシュできます。ファームウェアは既存の WebSocket 接続でイベントを送出し、gateway が設定済みの webhook URL に転送します。
+StackChan はデバイスイベントを HTTP webhook 経由で外部システム（Home Assistant / n8n / IFTTT / Pipedream / カスタムエンドポイントなど）にプッシュできます。ファームウェアは既存の WebSocket でイベントを送出し、gateway が設定済みの webhook URL に転送します。
 
-**対応イベント:**
+**全イベントのペイロードスキーマ、受信側サンプル（Home Assistant / n8n / IFTTT 等）、トラブルシューティング、新イベント種別の追加方法を含む完全リファレンスは [`docs/webhooks.md`](docs/webhooks.md)（英語）にまとめてあります。**
 
-| イベント | トリガー | ペイロード |
-|---|---|---|
-| `touch` | 頭のタップまたはストローク (Si12T センサ) | `{"gesture": "tap"\|"stroke", "duration_ms": 180, "zones": [true, false, false]}` |
-| `lcd_touch` | LCD 画面のタップ または長押し (FT6336) | `{"action": "tap"\|"long_press", "duration_ms": 120}` |
-| `state_changed` | デバイス状態遷移 | `{"state": "idle"\|"listening"\|"speaking"\|...}` |
-| `wake_word_detected` | ウェイクワード検出 (音声パイプライン) | `{"wake_word": "<検出された語>"}` |
-| `listen_start` | マイク収音開始 | `{"mode": "manual"\|"auto"\|"realtime"}` |
-| `listen_stop` | マイク収音終了 | `{}` |
-| `tts_start` | スピーカーで TTS 再生開始 | `{}` |
-| `tts_stop` | TTS 再生終了 | `{"duration_ms": 2400}` |
-| `low_battery` | バッテリー残量 20% を下回り、かつ放電中 (エッジトリガー) | `{"percent": 15, "is_critical": true}` |
+現在エミットされるイベントは 10 種類: `touch`, `lcd_touch`, `imu_motion`（シェイク／持ち上げ）, `state_changed`, `wake_word_detected`, `listen_start` / `listen_stop`, `tts_start` / `tts_stop`, `low_battery`。
 
-未対応（ファームウェアドライバ実装が必要）: `imu_motion` (BMI270 によるシェイク／持ち上げ検出 — upstream m5stack/StackChan のドライバが未ポート)。
-
-拡張性を重視した設計で、新しいイベント種別をファームウェアに追加するには `SendJsonString()` 1 回の呼び出しだけで済み、gateway 側の変更は不要です。
-
-### 設定
-
-ゲートウェイ側の環境変数:
-
-| 環境変数 | デフォルト | 補足 |
-|---|---|---|
-| `STACKCHAN_WEBHOOK_URLS` | *(なし)* | カンマ区切りの webhook 送信先 URL。未設定ならイベント転送なし |
-| `STACKCHAN_WEBHOOK_TOKENS` | *(なし)* | カンマ区切りの Bearer トークン（URL と位置で対応） |
-| `STACKCHAN_WEBHOOK_EVENTS` | *(全部)* | カンマ区切りのイベント種別フィルタ（例: `touch,state_changed`）。未設定なら全イベント転送 |
-
-### 使い方
+### クイックスタート
 
 ```bash
-STACKCHAN_WEBHOOK_URLS=https://n8n.local/webhook/stackchan \
+STACKCHAN_WEBHOOK_URLS=https://your-endpoint.com/hook \
   stackchan-mcp
 ```
 
-StackChan の頭をタップすると、webhook に以下が届きます:
+起動時に `Webhooks configured: 1 target(s) -> https://your-endpoint.com/hook` がログに出ます。StackChan の頭をタップすると、エンドポイントに以下が届きます:
 
 ```json
 {
   "event": "touch",
-  "timestamp_us": 123456789,
+  "timestamp_us": 1716739200123000,
   "device_id": "stackchan-abc",
   "data": {"gesture": "tap", "duration_ms": 180, "zones": [true, false, false]},
   "gateway_time": 1716739200.123
 }
 ```
+
+ゲートウェイは受信したイベントを webhook 配信の成否に関わらず INFO レベルで `Device event: touch {...}` としてログに出します — 「デバイス側がイベントを出していない」のか「webhook エンドポイント側の問題」なのかをすぐ切り分けるためです。詳しい診断手順は [`docs/webhooks.md`](docs/webhooks.md#troubleshooting) を参照してください。
+
+設定環境変数（詳細はドキュメント参照）: `STACKCHAN_WEBHOOK_URLS`（必須）, `STACKCHAN_WEBHOOK_TOKENS`（任意の Bearer 認証）, `STACKCHAN_WEBHOOK_EVENTS`（任意のイベントホワイトリスト）。ファームウェアに新イベント種別を追加するには `SendJsonString()` を 1 回呼ぶだけで OK — gateway が自動的に配信します（[`docs/webhooks.md#adding-a-new-event-type`](docs/webhooks.md#adding-a-new-event-type) 参照）。
 
 ## 既知の課題
 

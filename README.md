@@ -553,54 +553,34 @@ See [#80](https://github.com/kisaragi-mochi/stackchan-mcp/issues/80) for the low
 
 ## Event system (webhook integration)
 
-The StackChan can push device events to external systems (Home Assistant, n8n, IFTTT, custom endpoints) via HTTP webhooks. The firmware emits events over the existing WebSocket connection; the gateway fans them out to configured webhook URLs.
+The StackChan can push device events to external systems (Home Assistant, n8n, IFTTT, Pipedream, custom endpoints) via HTTP webhooks. The firmware emits events over the existing WebSocket; the gateway fans them out to configured webhook URLs.
 
-**Supported events:**
+**Full reference — including all event payload schemas, receiver examples (Home Assistant / n8n / IFTTT), troubleshooting, and how to add new event types — lives in [`docs/webhooks.md`](docs/webhooks.md).**
 
-| Event | Trigger | Payload |
-|---|---|---|
-| `touch` | Head tap or stroke (Si12T sensor) | `{"gesture": "tap"\|"stroke", "duration_ms": 180, "zones": [true, false, false]}` |
-| `lcd_touch` | LCD screen tap or long-press (FT6336) | `{"action": "tap"\|"long_press", "duration_ms": 120}` |
-| `state_changed` | Device state transition | `{"state": "idle"\|"listening"\|"speaking"\|...}` |
-| `wake_word_detected` | Wake-word fired in audio pipeline | `{"wake_word": "<detected word>"}` |
-| `listen_start` | Mic capture begins | `{"mode": "manual"\|"auto"\|"realtime"}` |
-| `listen_stop` | Mic capture ends | `{}` |
-| `tts_start` | TTS playback begins on speaker | `{}` |
-| `tts_stop` | TTS playback ends | `{"duration_ms": 2400}` |
-| `low_battery` | Battery crossed below 20% while discharging (edge-triggered) | `{"percent": 15, "is_critical": true}` |
+10 event types are currently emitted: `touch`, `lcd_touch`, `imu_motion` (shake/pickup), `state_changed`, `wake_word_detected`, `listen_start` / `listen_stop`, `tts_start` / `tts_stop`, `low_battery`.
 
-Planned (requires firmware driver work): `imu_motion` (shake/pickup detection via BMI270 — driver not yet ported from upstream m5stack/StackChan).
-
-The system is extensible — adding a new event type in firmware requires only a single `SendJsonString()` call; no gateway changes needed.
-
-### Configuration
-
-Set these environment variables on the gateway:
-
-| Environment variable | Default | Notes |
-|---|---|---|
-| `STACKCHAN_WEBHOOK_URLS` | *(none)* | Comma-separated webhook target URLs. Events are not forwarded if unset. |
-| `STACKCHAN_WEBHOOK_TOKENS` | *(none)* | Comma-separated Bearer tokens (positional match to URLs). |
-| `STACKCHAN_WEBHOOK_EVENTS` | *(all)* | Comma-separated event type filter (e.g. `touch,state_changed`). All events forwarded if unset. |
-
-### Example
+### Quick start
 
 ```bash
-STACKCHAN_WEBHOOK_URLS=https://n8n.local/webhook/stackchan \
+STACKCHAN_WEBHOOK_URLS=https://your-endpoint.com/hook \
   stackchan-mcp
 ```
 
-Tap the StackChan's head and the webhook receives:
+At startup the gateway logs `Webhooks configured: 1 target(s) -> https://your-endpoint.com/hook`. Tap the StackChan's head and your endpoint receives:
 
 ```json
 {
   "event": "touch",
-  "timestamp_us": 123456789,
+  "timestamp_us": 1716739200123000,
   "device_id": "stackchan-abc",
   "data": {"gesture": "tap", "duration_ms": 180, "zones": [true, false, false]},
   "gateway_time": 1716739200.123
 }
 ```
+
+The gateway also logs `Device event: touch {...}` at INFO for every received event, regardless of webhook delivery — useful for distinguishing "device not emitting" from "webhook endpoint problem". See [`docs/webhooks.md`](docs/webhooks.md#troubleshooting) for the full diagnostic walkthrough.
+
+Config env vars (full details in the docs): `STACKCHAN_WEBHOOK_URLS` (required), `STACKCHAN_WEBHOOK_TOKENS` (optional Bearer auth), `STACKCHAN_WEBHOOK_EVENTS` (optional event whitelist). Adding a new event type in firmware needs only a single `SendJsonString()` call; the gateway dispatches anything new automatically — see [`docs/webhooks.md#adding-a-new-event-type`](docs/webhooks.md#adding-a-new-event-type).
 
 ## Known issues
 
