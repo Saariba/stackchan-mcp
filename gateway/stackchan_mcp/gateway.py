@@ -122,12 +122,21 @@ class Gateway:
             self._webhook_dispatcher = WebhookDispatcher(webhook_targets)
             self.event_bus.subscribe(self._webhook_dispatcher.handle_event)
             logger.info(
-                "Webhooks configured: %d target(s)",
+                "Webhooks configured: %d target(s) -> %s",
                 len(webhook_targets),
+                ", ".join(t.url for t in webhook_targets),
+            )
+        else:
+            logger.warning(
+                "No webhooks configured — device events will be logged but "
+                "not forwarded. Set STACKCHAN_WEBHOOK_URLS to enable."
             )
 
+        # Always log device events at INFO so the device→gateway path is
+        # visible in normal logs (webhook dispatch failures vs events not
+        # arriving at all are distinguishable without DEBUG).
         async def _log_event(ev: DeviceEvent) -> None:
-            logger.debug("Device event: %s %s", ev.event, ev.data)
+            logger.info("Device event: %s %s", ev.event, ev.data)
 
         self.event_bus.subscribe(_log_event)
 
