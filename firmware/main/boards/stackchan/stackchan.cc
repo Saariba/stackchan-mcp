@@ -31,6 +31,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
+#include "bmi270_idf.h"
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -709,6 +710,19 @@ private:
     // with press judged via debounce, etc.).
     bool       press_start_zones_[3] = {false, false, false};
     uint8_t    press_start_output1_raw_ = 0;
+
+    // ---- BMI270 IMU (shake / pickup detection) --------------------------
+    struct bmi2_dev bmi270_dev_;
+    bool bmi270_ok_ = false;
+    TaskHandle_t imu_task_handle_ = nullptr;
+    static constexpr uint8_t BMI270_ADDR = 0x69;
+    static constexpr int IMU_POLL_MS = 80;
+    static constexpr int SHAKE_DELTA_THRESHOLD = 20000;
+    static constexpr int SHAKE_PEAK_COUNT = 3;
+    static constexpr int64_t SHAKE_WINDOW_MS = 1000;
+    static constexpr int64_t SHAKE_COOLDOWN_MS = 2000;
+    static constexpr int64_t PICKUP_COOLDOWN_MS = 3000;
+    static constexpr int PICKUP_GRAVITY_CHANGE_THRESHOLD = 6000;
 
     // Servo wobble sub-state. Keeps the previously-set angles untouched
     // before/after the wobble so that an external set_head_angles call is
@@ -3905,6 +3919,148 @@ private:
         ESP_LOGI(TAG, "Si12T touch poll started (%d ms interval)", TOUCH_POLL_MS);
     }
 
+    // ---- BMI270 IMU: shake / pickup detection ----------------------------
+
+    void EmitImuMotionEvent(const char* motion_type, int score) {
+        cJSON* root = cJSON_CreateObject();
+        if (root == nullptr) return;
+        cJSON_AddStringToObject(root, "type", "event");
+        cJSON_AddStringToObject(root, "event", "imu_motion");
+        cJSON_AddNumberToObject(root, "timestamp_us",
+                                static_cast<double>(esp_timer_get_time()));
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        if (data) {
+            cJSON_AddStringToObject(data, "motion", motion_type);
+            cJSON_AddNumberToObject(data, "score", static_cast<double>(score));
+        }
+        char* str = cJSON_PrintUnformatted(root);
+        if (str != nullptr) {
+            Application::GetInstance().SendJsonString(std::string(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(root);
+    }
+
+    static void ImuTask(void* arg) {
+        StackChanBoard* self = static_cast<StackChanBoard*>(arg);
+        if (self == nullptr || !self->bmi270_ok_) {
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        struct bmi2_sens_data prev = {};
+        struct bmi2_sens_data cur = {};
+        bool has_prev = false;
+        int64_t last_shake_ms = 0;
+        int shake_peak_count = 0;
+        int64_t last_shake_peak_ms = 0;
+        int64_t last_pickup_ms = 0;
+        int32_t baseline_z = 0;
+        bool has_baseline = false;
+        while (true) {
+            int8_t rslt = bmi2_get_sensor_data(&cur, &self->bmi270_dev_);
+            if (rslt != BMI2_OK) {
+                vTaskDelay(pdMS_TO_TICKS(IMU_POLL_MS));
+                continue;
+            }
+
+            int64_t now_ms = esp_timer_get_time() / 1000;
+
+            // -- Shake detection (differential acceleration) --
+            if (has_prev) {
+                int dx = abs(static_cast<int>(cur.acc.x) - static_cast<int>(prev.acc.x));
+                int dy = abs(static_cast<int>(cur.acc.y) - static_cast<int>(prev.acc.y));
+                int dz = abs(static_cast<int>(cur.acc.z) - static_cast<int>(prev.acc.z));
+                int shake_score = dx + dy + dz;
+
+                if (shake_score > SHAKE_DELTA_THRESHOLD) {
+                    if ((now_ms - last_shake_peak_ms) > 100) {
+                        if ((now_ms - last_shake_peak_ms) < SHAKE_WINDOW_MS) {
+                            shake_peak_count++;
+                        } else {
+                            shake_peak_count = 1;
+                        }
+                        last_shake_peak_ms = now_ms;
+
+                        if (shake_peak_count >= SHAKE_PEAK_COUNT &&
+                            (now_ms - last_shake_ms) > SHAKE_COOLDOWN_MS) {
+                            last_shake_ms = now_ms;
+                            shake_peak_count = 0;
+                            ESP_LOGI(TAG, "IMU: shake detected (score=%d)", shake_score);
+                            self->SetAvatarExpressionIfActive("sad");
+                            self->ScheduleIdleRevert();
+                            self->EmitImuMotionEvent("shake", shake_score);
+                        }
+                    }
+                }
+            }
+
+            // -- Pickup detection (gravity vector shift on Z) --
+            if (!has_baseline) {
+                baseline_z = cur.acc.z;
+                has_baseline = true;
+            } else {
+                int32_t z_change = abs(static_cast<int32_t>(cur.acc.z) - baseline_z);
+                if (z_change > PICKUP_GRAVITY_CHANGE_THRESHOLD &&
+                    (now_ms - last_pickup_ms) > PICKUP_COOLDOWN_MS) {
+                    last_pickup_ms = now_ms;
+                    baseline_z = cur.acc.z;
+                    ESP_LOGI(TAG, "IMU: pickup detected (z_change=%ld)", (long)z_change);
+                    self->SetAvatarExpressionIfActive("surprised");
+                    self->ScheduleIdleRevert();
+                    self->EmitImuMotionEvent("pickup", static_cast<int>(z_change));
+                }
+                baseline_z = baseline_z + (cur.acc.z - baseline_z) / 64;
+            }
+
+            prev = cur;
+            has_prev = true;
+            vTaskDelay(pdMS_TO_TICKS(IMU_POLL_MS));
+        }
+    }
+
+    void InitializeBmi270() {
+        ESP_LOGI(TAG, "Init BMI270 IMU (I2C addr 0x%02X)", BMI270_ADDR);
+        int8_t rslt = bmi270_idf_init(&bmi270_dev_, i2c_bus_, BMI270_ADDR);
+        if (rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "BMI270 not detected; shake/pickup disabled (other features unaffected)");
+            return;
+        }
+
+        uint8_t sens_list[1] = { BMI2_ACCEL };
+        rslt = bmi270_sensor_enable(sens_list, 1, &bmi270_dev_);
+        if (rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "BMI270 accel enable failed: %d", rslt);
+            bmi270_idf_deinit(&bmi270_dev_);
+            return;
+        }
+
+        struct bmi2_sens_config config;
+        config.type = BMI2_ACCEL;
+        rslt = bmi270_get_sensor_config(&config, 1, &bmi270_dev_);
+        if (rslt == BMI2_OK) {
+            config.cfg.acc.odr = BMI2_ACC_ODR_100HZ;
+            config.cfg.acc.range = BMI2_ACC_RANGE_2G;
+            config.cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;
+            config.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+            rslt = bmi270_set_sensor_config(&config, 1, &bmi270_dev_);
+        }
+        if (rslt != BMI2_OK) {
+            ESP_LOGW(TAG, "BMI270 accel config failed: %d", rslt);
+        }
+
+        bmi270_ok_ = true;
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            ImuTask, "imu_poll", 4096, this, 4, &imu_task_handle_, 1);
+        if (ret != pdPASS) {
+            ESP_LOGW(TAG, "IMU task creation failed");
+            bmi270_ok_ = false;
+            bmi270_idf_deinit(&bmi270_dev_);
+            return;
+        }
+        ESP_LOGI(TAG, "BMI270 shake/pickup detection started (%d ms poll)", IMU_POLL_MS);
+    }
+
     // Map a face name to AvatarSet's 0-indexed slot, or -1 if unknown.
     static int FaceNameToIndex(const char* face) {
         if (face == nullptr) return -1;
@@ -6128,6 +6284,7 @@ public:
         InitializeIOExpander();
         InitializeServo();
         InitializeSi12tTouch();
+        InitializeBmi270();
         I2cDetect();
         // Avatar auto-display disabled: WiFi config UI needs to be visible.
         // Avatar is shown on-demand via MCP set_avatar command.

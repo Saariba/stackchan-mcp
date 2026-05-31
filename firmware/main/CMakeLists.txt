@@ -1024,6 +1024,7 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
         espressif__touch_button_sensor
     )
 endif()
+list(APPEND MAIN_PRIV_REQUIRES_EXTRA bmi270)
 if(CONFIG_STACKCHAN_MDNS_DISCOVERY)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__mdns)
 endif()
