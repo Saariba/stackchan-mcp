@@ -56,6 +56,8 @@ The gateway translates between two tool naming conventions:
 | `set_all_leds` | `self.led.set_all` |
 | `set_leds` | `self.led.set_many` |
 | `clear_leds` | `self.led.clear` |
+| `draw_pixel_art` | `self.display.draw_pixels` |
+| `clear_pixel_art` | `self.display.clear_pixels` |
 
 The mapping lives in `gateway/stackchan_mcp/stdio_server.py`.
 

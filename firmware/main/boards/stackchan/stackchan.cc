@@ -43,6 +43,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <esp_random.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -536,6 +537,19 @@ private:
     lv_obj_t* avatar_img_ = nullptr;
     esp_timer_handle_t avatar_init_timer_ = nullptr;
     std::string current_avatar_face_ = "idle";
+
+    // Custom pixel-art overlay (self.display.draw_pixels). Created on the
+    // LVGL top layer so it always renders above the avatar / chat UI
+    // regardless of any move_foreground() the avatar reaction paths do, and
+    // persists until self.display.clear_pixels. The source grid is
+    // nearest-neighbor upscaled in firmware into pixel_art_buf_ (a full-frame
+    // RGB565 buffer in PSRAM) and shown 1:1, so it is exactly centered with
+    // even, undistorted blocks (no LVGL transform). Mutated only under
+    // DisplayLockGuard.
+    lv_obj_t* pixel_art_img_ = nullptr;
+    uint8_t* pixel_art_buf_ = nullptr;
+    size_t pixel_art_buf_cap_ = 0;
+    lv_image_dsc_t pixel_art_dsc_ = {};
 
     // Dynamic avatar set loaded via the load_avatar_set MCP tool. Stays
     // unloaded by default — AvatarImageFor() then falls back to the static
@@ -4243,6 +4257,132 @@ private:
         return true;
     }
 
+    // ---- Custom pixel-art overlay (self.display.draw_pixels) ------------
+
+    // Create pixel_art_img_ on the LVGL top layer, which always renders
+    // above the active screen — so it sits over the avatar without fighting
+    // the avatar's move_foreground() calls. Caller must hold the display
+    // lock. Returns false if the top layer is not available yet.
+    bool EnsurePixelArtObject() {
+        if (pixel_art_img_ != nullptr) {
+            return true;
+        }
+        lv_obj_t* top = lv_layer_top();
+        if (top == nullptr) {
+            return false;
+        }
+        pixel_art_img_ = lv_image_create(top);
+        if (pixel_art_img_ == nullptr) {
+            return false;
+        }
+        lv_obj_clear_flag(pixel_art_img_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(pixel_art_img_, LV_ALIGN_CENTER, 0, 0);
+        return true;
+    }
+
+    // Decode a base64 little-endian RGB565 grid, nearest-neighbor upscale it
+    // in firmware to fill the LCD, and show it 1:1 (no LVGL transform) so it
+    // is exactly centered with even, undistorted blocks. Persists until
+    // ClearPixelArt(). Safe to call from any task.
+    bool DrawPixelArt(const std::string& b64, int width, int height) {
+        if (display_ == nullptr) {
+            ESP_LOGW(TAG, "DrawPixelArt ignored: display_ not ready");
+            return false;
+        }
+        if (width <= 0 || height <= 0 || width > 320 || height > 240) {
+            ESP_LOGW(TAG, "DrawPixelArt rejected: bad size %dx%d", width, height);
+            return false;
+        }
+        const size_t src_bytes = static_cast<size_t>(width) * height * 2;
+        std::vector<uint8_t> src(src_bytes);
+        size_t olen = 0;
+        int rc = mbedtls_base64_decode(
+            src.data(), src.size(), &olen,
+            reinterpret_cast<const unsigned char*>(b64.data()), b64.size());
+        if (rc != 0 || olen != src_bytes) {
+            ESP_LOGW(TAG,
+                     "DrawPixelArt rejected: decode rc=%d olen=%u expected=%u",
+                     rc, (unsigned)olen, (unsigned)src_bytes);
+            return false;
+        }
+
+        // Integer nearest-neighbor scale to fill the 320x240 LCD (the locked
+        // 32x24 grid -> x10 -> exactly 320x240). Smaller axis ratio keeps the
+        // whole grid on-screen for other sizes (centered, letterboxed).
+        int scale = 320 / width;
+        const int scale_h = 240 / height;
+        if (scale_h < scale) scale = scale_h;
+        if (scale < 1) scale = 1;
+        const int out_w = width * scale;
+        const int out_h = height * scale;
+        const size_t out_bytes = static_cast<size_t>(out_w) * out_h * 2;
+
+        DisplayLockGuard lock(display_);
+        if (!EnsurePixelArtObject()) {
+            return false;
+        }
+        if (pixel_art_buf_cap_ < out_bytes) {
+            if (pixel_art_buf_ != nullptr) {
+                heap_caps_free(pixel_art_buf_);
+            }
+            pixel_art_buf_ = static_cast<uint8_t*>(
+                heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (pixel_art_buf_ == nullptr) {
+                pixel_art_buf_cap_ = 0;
+                ESP_LOGE(TAG, "DrawPixelArt: PSRAM alloc failed (%u bytes)",
+                         (unsigned)out_bytes);
+                return false;
+            }
+            pixel_art_buf_cap_ = out_bytes;
+        }
+
+        // Expand each source pixel into a scale x scale block.
+        const uint16_t* sp = reinterpret_cast<const uint16_t*>(src.data());
+        uint16_t* dp = reinterpret_cast<uint16_t*>(pixel_art_buf_);
+        for (int sy = 0; sy < height; ++sy) {
+            for (int sx = 0; sx < width; ++sx) {
+                const uint16_t px = sp[sy * width + sx];
+                const int ox = sx * scale;
+                for (int dy = 0; dy < scale; ++dy) {
+                    uint16_t* row = dp + static_cast<size_t>(sy * scale + dy) * out_w + ox;
+                    for (int dx = 0; dx < scale; ++dx) {
+                        row[dx] = px;
+                    }
+                }
+            }
+        }
+
+        pixel_art_dsc_ = {};
+        pixel_art_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+        pixel_art_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
+        pixel_art_dsc_.header.w = out_w;
+        pixel_art_dsc_.header.h = out_h;
+        pixel_art_dsc_.header.stride = out_w * 2;
+        pixel_art_dsc_.data = pixel_art_buf_;
+        pixel_art_dsc_.data_size = out_bytes;
+        lv_image_set_src(pixel_art_img_, &pixel_art_dsc_);
+        lv_image_set_scale(pixel_art_img_, 256);  // 1:1 (upscale already baked in)
+        lv_obj_align(pixel_art_img_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_clear_flag(pixel_art_img_, LV_OBJ_FLAG_HIDDEN);
+        ESP_LOGI(TAG, "DrawPixelArt: %dx%d -> %dx%d (x%d) shown",
+                 width, height, out_w, out_h, scale);
+        return true;
+    }
+
+    // Hide the pixel-art overlay so the avatar underneath shows again. The
+    // lv_image and its buffer are kept allocated for cheap re-show.
+    bool ClearPixelArt() {
+        if (display_ == nullptr) {
+            return false;
+        }
+        DisplayLockGuard lock(display_);
+        if (pixel_art_img_ != nullptr) {
+            lv_obj_add_flag(pixel_art_img_, LV_OBJ_FLAG_HIDDEN);
+        }
+        ESP_LOGI(TAG, "ClearPixelArt: overlay hidden");
+        return true;
+    }
+
     // Apply the requested face to avatar_img_. Returns false if the face is
     // unknown or the avatar object cannot be created yet.
     bool SetAvatarExpressionLocked(const char* face) {
@@ -5456,6 +5596,50 @@ private:
                         "Display not ready yet; retry after a moment.");
                 }
                 ESP_LOGI(TAG, "set_avatar: face=%s applied=%d", face.c_str(), applied);
+                return root;
+            });
+
+        // Custom pixel art: draw a small RGB565 grid scaled to fill the LCD.
+        // 'data' is base64-encoded little-endian RGB565 (width*height*2 bytes
+        // before encoding); the gateway's draw_pixel_art tool expands a
+        // palette + index grid into it. Rendered nearest-neighbor (crisp
+        // blocks) on the LVGL top layer, so it sits above the avatar and
+        // persists until clear_pixels.
+        mcp_server.AddTool(
+            "self.display.draw_pixels",
+            "Draw custom pixel art on the LCD. 'data' is base64-encoded "
+            "little-endian RGB565 of a width x height grid; it is scaled "
+            "nearest-neighbor to fill the 320x240 screen and persists until "
+            "clear_pixels. Driven by the gateway's draw_pixel_art tool.",
+            PropertyList({
+                Property("data", kPropertyTypeString),
+                Property("width", kPropertyTypeInteger),
+                Property("height", kPropertyTypeInteger),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string data = properties["data"].value<std::string>();
+                int width = properties["width"].value<int>();
+                int height = properties["height"].value<int>();
+                bool ok = DrawPixelArt(data, width, height);
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", ok);
+                if (!ok) {
+                    cJSON_AddStringToObject(root, "error",
+                        "Invalid pixel data or display not ready.");
+                }
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.display.clear_pixels",
+            "Remove custom pixel art drawn by draw_pixels and reveal the "
+            "avatar underneath.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                bool ok = ClearPixelArt();
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", ok);
                 return root;
             });
 

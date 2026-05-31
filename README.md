@@ -61,6 +61,8 @@ This repository is a monorepo.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color | ✅ |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array in a single I2C burst (use this for animations / multi-color patterns); trailing LEDs keep their previous color | ✅ |
 | `clear_leds` | Turn all 12 base RGB LEDs off | ✅ |
+| `draw_pixel_art(palette, pixels)` | Draw custom pixel art on the LCD: a 32×24 grid (palette of up to 16 `#RRGGBB` colors + 24 rows × 32 hex-digit indices) upscaled ×10 to fill the screen. Rides the WebSocket inline — no `VISION_HOST` needed; persists until `clear_pixel_art`. See [`docs/pixel_art.md`](docs/pixel_art.md). | ✅ |
+| `clear_pixel_art` | Remove pixel art and restore the avatar | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | Speak text on the device speaker via gateway-side TTS. Default engine: **VOICEVOX** (runs as a separate HTTP service — see [TTS setup](#optional-tts-setup-voicevox)). Requires the `[tts]` extra. | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | Capture a short utterance from the device microphone and transcribe it via gateway-side STT. Default engine: **faster-whisper** (local, MIT) — see [STT setup](#optional-stt-setup-faster-whisper). Optional `motion` feedback can show the `thinking` face or tilt the head up during capture. Requires the `[stt-faster-whisper]` (or `[stt-openai]`) extra and a firmware update with the inbound `listen` wire type. | ✅ |
 
@@ -526,6 +528,14 @@ Expected PNG filenames under `~/.stackchan/avatar/`:
 - Mouth: `mouth_closed.png`, `mouth_half.png`, `mouth_open.png`, `mouth_e.png`, `mouth_u.png`
 
 Do not commit personal PNGs, generated local avatar files, photos, or other user-specific assets.
+
+## Drawing pixel art
+
+Beyond the avatar, you can draw **arbitrary custom pixel art** on the LCD with the `draw_pixel_art` tool. You author a 32×24 grid as a palette (up to 16 `#RRGGBB` colors) plus 24 rows of 32 hex-digit indices; the gateway packs it and the firmware upscales it ×10 to fill the 320×240 screen with crisp blocks. It travels inline over the existing WebSocket (no `VISION_HOST` setup) and persists on top of the avatar until `clear_pixel_art`.
+
+**Full reference — the tool schemas, a ready-to-paste example, and how to author images (by hand, by downscaling an existing image with Pillow, or procedurally) — lives in [`docs/pixel_art.md`](docs/pixel_art.md).**
+
+This needs a firmware build that includes the `self.display.draw_pixels` / `clear_pixels` tools (build via `firmware/scripts/release.py stackchan` and flash `build/merged-binary.bin`).
 
 ## Hardware safety notes
 

@@ -32,6 +32,20 @@ documented-only.
 
 ### Firmware
 
+- Added: `self.display.draw_pixels` / `self.display.clear_pixels` MCP
+  tools — draw arbitrary custom pixel art on the 320×240 LCD.
+  `draw_pixels` takes a base64-encoded little-endian RGB565 grid plus
+  `width`/`height`; the firmware mbedTLS-decodes it, nearest-neighbor
+  upscales it into a full-frame RGB565 buffer in PSRAM, and shows it
+  1:1 on the LVGL top layer — above the avatar, so autonomous reactions
+  (touch / IMU / blink) keep running underneath without popping through,
+  and it persists until `clear_pixels`. Rendering 1:1 (rather than via
+  `lv_image_set_scale`) keeps the blocks exactly centered and evenly
+  sized — the transform path rendered off-center and distorted on
+  device. The grid travels inline over the existing WebSocket, so no
+  `VISION_HOST` / HTTP setup is involved. Driven by the gateway's
+  `draw_pixel_art` tool; see [`docs/pixel_art.md`](docs/pixel_art.md).
+
 - Changed: the device no longer auto-enters Listening after a TTS
   utterance ends. The `Application::OnIncomingJson` handler for the
   `tts.stop` event used to fall through to
@@ -231,6 +245,17 @@ documented-only.
 
 ### Gateway
 
+- Added: `draw_pixel_art` / `clear_pixel_art` MCP tools plus the
+  `pixel_art.encode_pixel_art` helper. `draw_pixel_art` takes a compact
+  palette + index grid (up to 16 `#RRGGBB` colors and 24 rows × 32
+  hex-digit indices), validates it, expands it to a little-endian RGB565
+  buffer (packed exactly like `convert_avatars.py`), base64-encodes it,
+  and forwards it to the device's `self.display.draw_pixels` over the
+  existing WebSocket — no HTTP staging or `VISION_HOST` needed.
+  `clear_pixel_art` maps to `self.display.clear_pixels`. The 32×24 grid
+  upscales ×10 on-device to fill the 320×240 LCD. See
+  [`docs/pixel_art.md`](docs/pixel_art.md).
+
 - Fixed: mDNS now advertises the host's IPv4 addresses ordered by LAN
   reachability instead of in interface-enumeration order. On a host with
   multiple interfaces (a CGNAT `100.64.0.0/10` overlay address, several LAN
@@ -322,6 +347,17 @@ documented-only.
   request-handling layer, so this closes a tool-surface inconsistency
   rather than a functional gap. Tool descriptions now state the
   constraint explicitly.
+
+### Docs
+
+- Added: [`docs/pixel_art.md`](docs/pixel_art.md) — how to use the
+  `draw_pixel_art` / `clear_pixel_art` tools and how to author pixel art
+  (by hand, by downscaling an existing image with Pillow, or
+  procedurally), including the palette/index grid format, a ready-to-paste
+  example, RGB565 color-fidelity notes, and troubleshooting. The
+  `README.md` / `README.ja.md` tool tables, `docs/architecture.md`
+  tool-name mapping, and `gateway/README.md` tool list were updated to
+  list the two new tools.
 
 ## [firmware-v1.8.0] - 2026-05-20
 

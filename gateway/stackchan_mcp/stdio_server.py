@@ -15,6 +15,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .gateway import get_gateway
+from .pixel_art import encode_pixel_art
 from .stt import listen_and_transcribe
 from .tts import synthesize_and_send
 
@@ -758,6 +759,52 @@ def create_server() -> Server:
                     "required": ["archive_path", "mode"],
                 },
             ),
+            Tool(
+                name="draw_pixel_art",
+                description=(
+                    "Draw custom pixel art on the robot's 320x240 LCD. The art "
+                    "is a 32x24 grid scaled x10 to fill the screen with crisp "
+                    "(nearest-neighbor) blocky pixels. Author it as a small "
+                    "palette plus an index grid: 'palette' is 1-16 colors as "
+                    "'#RRGGBB'; 'pixels' is 24 rows, each a 32-character string "
+                    "where every character is a single hex digit 0-f selecting "
+                    "a palette entry (index 0 = first palette color). The image "
+                    "rides the existing connection (no network setup needed) and "
+                    "persists until you call clear_pixel_art or change the "
+                    "avatar."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "palette": {
+                            "type": "array",
+                            "description": "1-16 colors as '#RRGGBB'.",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 16,
+                        },
+                        "pixels": {
+                            "type": "array",
+                            "description": (
+                                "24 rows; each row is a 32-char string of hex "
+                                "digits (0-f), one per pixel, indexing palette."
+                            ),
+                            "items": {"type": "string"},
+                            "minItems": 24,
+                            "maxItems": 24,
+                        },
+                    },
+                    "required": ["palette", "pixels"],
+                },
+            ),
+            Tool(
+                name="clear_pixel_art",
+                description=(
+                    "Remove pixel art drawn by draw_pixel_art and restore the "
+                    "avatar face."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
         ]
 
     @server.call_tool()
@@ -841,6 +888,41 @@ def create_server() -> Server:
                     text=json.dumps({"error": "No ESP32 device connected. Please check the device."}),
                 )
             ]
+
+        if name == "draw_pixel_art":
+            # Expand the palette + index grid into a base64 RGB565 blob on
+            # the gateway, then forward it inline over the existing WS. No
+            # HTTP / host config — the payload is tiny (32x24 = ~2 KB b64).
+            try:
+                data, width, height = encode_pixel_art(
+                    arguments.get("palette", []),
+                    arguments.get("pixels", []),
+                )
+            except ValueError as exc:
+                return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+            result, error = await gw.esp32.call_tool(
+                "self.display.draw_pixels",
+                {"data": data, "width": width, "height": height},
+            )
+            if error:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": error.get("message", str(error))}),
+                    )
+                ]
+            return [TextContent(type="text", text=json.dumps(result))]
+
+        if name == "clear_pixel_art":
+            result, error = await gw.esp32.call_tool("self.display.clear_pixels", {})
+            if error:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": error.get("message", str(error))}),
+                    )
+                ]
+            return [TextContent(type="text", text=json.dumps(result))]
 
         if name == "move_head":
             # Belt-and-suspenders validation for the recommended pitch range.

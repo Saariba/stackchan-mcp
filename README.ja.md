@@ -61,6 +61,8 @@
 | `set_all_leds(r, g, b)` | ベース部の RGB LED 12 個すべてを同じ色に設定 | ✅ |
 | `set_leds(colors)` | `[[r,g,b], ...]` 配列で先頭 N 個を一括設定（I2C 1 回のバースト送信、アニメーション等向け）。指定外の LED は前の色を保持 | ✅ |
 | `clear_leds` | ベース部の RGB LED 12 個すべて消灯 | ✅ |
+| `draw_pixel_art(palette, pixels)` | LCD にカスタムピクセルアートを描画：32×24 グリッド（最大 16 色の `#RRGGBB` パレット + 32 文字 × 24 行の 16 進数インデックス）を ×10 拡大して画面いっぱいに表示。WebSocket 経由でインライン送信（`VISION_HOST` 不要）、`clear_pixel_art` まで保持。詳細は [`docs/pixel_art.md`](docs/pixel_art.md) 参照 | ✅ |
+| `clear_pixel_art` | ピクセルアートを消去してアバターに戻す | ✅ |
 | `say(text, voice?, speaker_id?, reference_audio?)` | gateway 側 TTS でデバイススピーカーから喋らせる。デフォルトエンジンは **VOICEVOX**（別 HTTP サービスとして起動 — [TTS セットアップ](#4-オプション-tts-セットアップ-voicevox) 参照）。`[tts]` extras が必要 | ✅ |
 | `listen(duration_ms?, engine?, language?, model?, motion?, look_up_pitch?)` | デバイスマイクから短い発話をキャプチャし、gateway 側 STT で文字起こし。デフォルトエンジンは **faster-whisper**（ローカル動作・MIT — [STT セットアップ](#5-オプション-stt-セットアップ-faster-whisper) 参照）。任意の `motion` feedback で、キャプチャ中に `thinking` face を出したり、頭を上向きに傾けたりできます。`[stt-faster-whisper]`（または `[stt-openai]`）extras と、`listen` ワイヤタイプを受け付けるファームウェアが必要 | ✅ |
 
@@ -474,6 +476,14 @@ python scripts/avatar_convert/convert_avatars.py
 - 口: `mouth_closed.png`, `mouth_half.png`, `mouth_open.png`, `mouth_e.png`, `mouth_u.png`
 
 個人用 PNG、生成済みローカルアバター、撮影画像、その他ユーザー固有のアセットは commit しないでください。
+
+## ピクセルアートの描画
+
+アバターとは別に、`draw_pixel_art` ツールで **任意のカスタムピクセルアート** を LCD に描画できます。32×24 グリッドをパレット（最大 16 色の `#RRGGBB`）+ 32 文字 × 24 行の 16 進数インデックスとして記述すると、gateway がパックし、firmware が ×10 拡大して 320×240 の画面いっぱいにくっきりとしたブロックで表示します。既存の WebSocket 経由でインライン送信されるため `VISION_HOST` の設定は不要で、`clear_pixel_art` を呼ぶまでアバターの上に保持されます。
+
+**ツールスキーマ、すぐ貼り付けて試せる例、画像の作り方（手描き / Pillow で既存画像を縮小 / プログラムで生成）の完全なリファレンスは [`docs/pixel_art.md`](docs/pixel_art.md) にあります。**
+
+この機能には `self.display.draw_pixels` / `clear_pixels` ツールを含む firmware ビルドが必要です（`firmware/scripts/release.py stackchan` でビルドし、`build/merged-binary.bin` を書き込んでください）。
 
 ## イベントシステム（Webhook 連携）
 

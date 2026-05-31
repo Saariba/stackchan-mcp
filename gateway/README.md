@@ -168,6 +168,8 @@ Same shape, under `mcpServers`.
 | `set_all_leds(r, g, b)` | Set all 12 base RGB LEDs to the same color. Updates immediately. |
 | `set_leds(colors)` | Batch-set the first N LEDs from a `[[r,g,b], ...]` array (1..12 entries). Single I2C burst + one latch — use this for animations / multi-color patterns instead of N individual `set_led` calls. Trailing LEDs (beyond `len(colors)`) keep their previous color. Validation is atomic: a malformed entry rejects the whole call without mutating any LED. |
 | `clear_leds` | Turn all 12 base RGB LEDs off. |
+| `draw_pixel_art(palette, pixels)` | Draw custom pixel art on the LCD. `palette` is 1–16 colors (`#RRGGBB`); `pixels` is 24 rows × 32 hex-digit (`0`–`f`) palette indices. The gateway expands the grid to little-endian RGB565, base64-encodes it, and forwards it inline as `self.display.draw_pixels` (no `VISION_HOST` needed). The firmware nearest-neighbor upscales ×10 to fill 320×240 and persists it on top of the avatar. See [`../docs/pixel_art.md`](../docs/pixel_art.md). |
+| `clear_pixel_art` | Remove pixel art (`self.display.clear_pixels`) and reveal the avatar. |
 
 The 12 base LEDs are 12× WS2812C wired to the PY32L020 IO expander
 (expander pin 13, not an ESP32 GPIO), so all four LED tools share the

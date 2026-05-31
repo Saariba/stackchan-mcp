@@ -1,5 +1,6 @@
 """Tests for stdio MCP server tool definitions."""
 
+import base64
 import json
 
 import pytest
@@ -323,6 +324,116 @@ async def test_say_returns_error_json_when_device_disconnects_mid_stream(
     assert "error" in payload
     msg = payload["error"].lower()
     assert "disconnect" in msg or "frame" in msg
+
+
+@pytest.mark.asyncio
+async def test_draw_pixel_art_relays_base64_rgb565(monkeypatch):
+    """draw_pixel_art expands palette+indices and forwards a base64 RGB565 blob."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": json.dumps({"ok": True})}]}, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    palette = ["#FF0000", "#00FF00"]
+    pixels = ["0" * 32 for _ in range(24)]
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "draw_pixel_art",
+                "arguments": {"palette": palette, "pixels": pixels},
+            },
+        )
+    )
+
+    assert len(calls) == 1
+    name, arguments = calls[0]
+    assert name == "self.display.draw_pixels"
+    assert arguments["width"] == 32
+    assert arguments["height"] == 24
+    decoded = base64.b64decode(arguments["data"])
+    assert len(decoded) == 32 * 24 * 2  # RGB565
+
+
+@pytest.mark.asyncio
+async def test_draw_pixel_art_validation_error_does_not_dispatch(monkeypatch):
+    """A malformed grid returns clean error JSON and never calls the device."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": []}, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    # Full-shaped 24x32 grid (passes the SDK JSON schema) but pixel index 1
+    # exceeds the single-color palette — caught by the gateway encoder, which
+    # must return clean error JSON and never reach the device.
+    pixels = ["1" + "0" * 31] + ["0" * 32 for _ in range(23)]
+    result = await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={
+                "name": "draw_pixel_art",
+                "arguments": {"palette": ["#FF0000"], "pixels": pixels},
+            },
+        )
+    )
+
+    assert calls == []
+    payload = json.loads(result.root.content[0].text)
+    assert "error" in payload
+
+
+@pytest.mark.asyncio
+async def test_clear_pixel_art_relays_to_device(monkeypatch):
+    """clear_pixel_art maps to self.display.clear_pixels."""
+    calls = []
+
+    class FakeESP32:
+        device_connected = True
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": json.dumps({"ok": True})}]}, None
+
+    class FakeGateway:
+        esp32 = FakeESP32()
+
+    import stackchan_mcp.stdio_server as stdio_server
+
+    monkeypatch.setattr(stdio_server, "get_gateway", lambda: FakeGateway())
+    server = create_server()
+
+    await server.request_handlers[CallToolRequest](
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "clear_pixel_art", "arguments": {}},
+        )
+    )
+
+    assert calls == [("self.display.clear_pixels", {})]
 
 
 @pytest.mark.asyncio
